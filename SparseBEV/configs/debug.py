@@ -21,7 +21,7 @@ point_cloud_range = [-51.2, -51.2, -5.0, 51.2, 51.2, 3.0]
 voxel_size = [0.2, 0.2, 8]
 
 # arch config
-embed_dims = 256
+embed_dims = 16
 num_layers = 6
 num_query = 900
 num_frames = 8
@@ -208,7 +208,7 @@ lr_config = dict(
     min_lr_ratio=1e-3
 )
 total_epochs = 24
-batch_size = 8
+batch_size = 2
 
 # load pretrained weights
 load_from = '/gdata2/hanpg/home/projects/mmatchBEV/pretrain/cascade_mask_rcnn_r50_fpn_coco-20e_20e_nuim_20201009_124951-40963960.pth'

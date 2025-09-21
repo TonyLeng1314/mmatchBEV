@@ -61,11 +61,11 @@ def main():
         else:
             run_name = ''
             if not cfgs.debug:
-                run_name = input('Name your run (leave blank for default): ')
+                run_name = ''
             if run_name == '':
                 run_name = datetime.now().strftime("%Y-%m-%d/%H-%M-%S")
 
-            work_dir = os.path.join('outputs', cfgs.model.type, run_name)
+            work_dir = os.path.join('/gdata2/hanpg/home/projects/mmatchBEV/SparseBEV/outputs', cfgs.model.type, run_name)
             if os.path.exists(work_dir):  # must be an empty dir
                 if input('Path "%s" already exists, overwrite it? [Y/n] ' % work_dir) == 'n':
                     print('Bye.')

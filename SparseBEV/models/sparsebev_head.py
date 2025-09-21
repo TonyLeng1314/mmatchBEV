@@ -426,6 +426,10 @@ class SparseBEVHead(DETRHead):
         all_gt_labels_list = [gt_labels_list for _ in range(num_dec_layers)]
         all_gt_bboxes_ignore_list = [gt_bboxes_ignore for _ in range(num_dec_layers)]
 
+        # for_save = {'all_cls_scores':all_cls_scores,'all_bbox_preds':all_bbox_preds,'all_gt_bboxes_list':all_gt_bboxes_list,'all_gt_labels_list':all_gt_labels_list}
+        # torch.save(for_save,'loss_raw_data.pt')
+        # import pdb;pdb.set_trace()
+        
         losses_cls, losses_bbox = multi_apply(
             self.loss_single, all_cls_scores, all_bbox_preds,
             all_gt_bboxes_list, all_gt_labels_list, 
