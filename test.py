@@ -5,8 +5,9 @@ import torch
 from math import atan2
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+from SparseBEV.models.bbox import utils as boxutils
 
-def plot_boxes_3d(tensors_900x10, ax=None, max_boxes=None, linewidth=1.0, alpha=1.0, show_center=True):
+def plot_boxes_3d(tensors_900x10, ax=None, max_boxes=None, linewidth=1.0, alpha=1.0, show_center=False,color = 'red'):
     """
     在 matplotlib 3D 中绘制 3D 框。
     输入:
@@ -50,8 +51,8 @@ def plot_boxes_3d(tensors_900x10, ax=None, max_boxes=None, linewidth=1.0, alpha=
 
     # 遍历每个 box
     for i, row in enumerate(data):
-        x_c, y_c, z_c = float(row[0]), float(row[1]), float(row[2])
-        w, l, h = float(row[3]), float(row[4]), float(row[5])
+        x_c, y_c, z_c = float(row[0]), float(row[1]), float(row[4])
+        w, l, h = float(row[2]), float(row[3]), float(row[5])
         sin_v, cos_v = float(row[6]), float(row[7])
 
         # 计算 yaw（确保用 atan2(sin, cos)）
@@ -83,11 +84,11 @@ def plot_boxes_3d(tensors_900x10, ax=None, max_boxes=None, linewidth=1.0, alpha=
         # 画 12 条边
         for (a, b) in edges:
             ax.plot([xs[a], xs[b]], [ys[a], ys[b]], [zs[a], zs[b]],
-                    linewidth=linewidth, alpha=alpha)
+                    linewidth=linewidth, alpha=alpha,color=color)
 
         # 可选：画中心点
         if show_center:
-            ax.scatter([x_c], [y_c], [z_c], marker='o', s=0.1, depthshade=False)
+            ax.scatter([x_c], [y_c], [z_c], marker='.', s=0.1, depthshade=False)
 
     # 设置等比（让长宽高比例真实显示）
     # 这是 matplotlib 的常用技巧：按所有点范围设置相同的 scale
@@ -118,26 +119,22 @@ def plot_boxes_3d(tensors_900x10, ax=None, max_boxes=None, linewidth=1.0, alpha=
     return ax
 
 
-loss_raw_data = torch.load('loss_raw_data.pt')
+loss_raw_data = torch.load('loss_raw_data_baseline.pt')
 
 all_cls_scores = loss_raw_data['all_cls_scores']
 all_bbox_preds = loss_raw_data['all_bbox_preds']
 all_gt_bboxes_list = loss_raw_data['all_gt_bboxes_list']
 all_gt_labels_list = loss_raw_data['all_gt_labels_list']
 
-# fake = torch.zeros(5, 10)
-# fake[:,0] = torch.linspace(0, 4, 5)   # x
-# fake[:,1] = 0                         # y
-# fake[:,2] = 0                         # z
-# fake[:,3] = 1.0                       # w
-# fake[:,4] = 2.0                       # l
-# fake[:,5] = 1.0                       # h
-# angles = torch.linspace(0, 3.14, 5)
-# fake[:,6] = torch.sin(angles)         # sin
-# fake[:,7] = torch.cos(angles)         # cos
 
-ax = plot_boxes_3d(all_bbox_preds[0,0],linewidth=0.1)
-plt.savefig('output.png',dpi=1200)
+
+ax = plot_boxes_3d(all_bbox_preds[5,0],linewidth=0.1,color='blue')
+gt_bboxes = all_gt_bboxes_list[0][0]
+gt_bboxes = boxutils.normalize_bbox(gt_bboxes)
+ax = plot_boxes_3d(gt_bboxes,ax=ax,linewidth=0.1)
+
+
+plt.savefig('output.png',dpi=500)
 
 
 import pdb;pdb.set_trace()
