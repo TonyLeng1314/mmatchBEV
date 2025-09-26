@@ -9,6 +9,7 @@ from mmdet3d.core.bbox.coders import build_bbox_coder
 from mmdet3d.core.bbox.structures.lidar_box3d import LiDARInstance3DBoxes
 from .bbox.utils import normalize_bbox, encode_bbox
 from .utils import VERSION
+from .mmatch.sparsebev_mmatch import loss_cal
 
 
 @HEADS.register_module()
@@ -427,8 +428,10 @@ class SparseBEVHead(DETRHead):
         all_gt_bboxes_ignore_list = [gt_bboxes_ignore for _ in range(num_dec_layers)]
 
         # for_save = {'all_cls_scores':all_cls_scores,'all_bbox_preds':all_bbox_preds,'all_gt_bboxes_list':all_gt_bboxes_list,'all_gt_labels_list':all_gt_labels_list}
-        # torch.save(for_save,'loss_raw_data_baseline.pt')
-        # import pdb;pdb.set_trace()
+        # torch.save(for_save,'loss_raw_data_v1.pt')
+        import pdb;pdb.set_trace()
+        
+        loss_mmatch = loss_cal(all_cls_scores,all_bbox_preds,all_gt_bboxes_list,all_gt_labels_list)
         
         losses_cls, losses_bbox = multi_apply(
             self.loss_single, all_cls_scores, all_bbox_preds,
@@ -461,6 +464,8 @@ class SparseBEVHead(DETRHead):
             loss_dict[f'd{num_dec_layer}.loss_cls'] = loss_cls_i
             loss_dict[f'd{num_dec_layer}.loss_bbox'] = loss_bbox_i
             num_dec_layer += 1
+            
+        loss_dict['mmatch_loss'] = loss_mmatch
         return loss_dict
 
     @force_fp32(apply_to=('preds_dicts'))
