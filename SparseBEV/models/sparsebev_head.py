@@ -429,7 +429,7 @@ class SparseBEVHead(DETRHead):
 
         # for_save = {'all_cls_scores':all_cls_scores,'all_bbox_preds':all_bbox_preds,'all_gt_bboxes_list':all_gt_bboxes_list,'all_gt_labels_list':all_gt_labels_list}
         # torch.save(for_save,'loss_raw_data_v1.pt')
-        import pdb;pdb.set_trace()
+        # import pdb;pdb.set_trace()
         
         loss_mmatch = loss_cal(all_cls_scores,all_bbox_preds,all_gt_bboxes_list,all_gt_labels_list)
         

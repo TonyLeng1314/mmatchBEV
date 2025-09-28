@@ -3,6 +3,7 @@ from torch import Tensor
 from ..bbox.utils import normalize_bbox
 from .IoU import boxes3d_iou
 import torch.nn.functional as F
+from mmdet.models.losses import FocalLoss
 
 
 def assign_topk_per_gt(iou, k=3, min_iou=0.0):
@@ -31,7 +32,14 @@ def loss_cal(
     topk = 3,
       
 ):
+    # settings:
+    with_cls_loss = False
+    
+    
+    
     batches = all_cls_scores.shape[1]
+    device = all_cls_scores.device
+    focal = FocalLoss(use_sigmoid=True, gamma=2.0, alpha=0.25, loss_weight=2.0).to(device)
     
     loss_list = []
     
@@ -41,6 +49,9 @@ def loss_cal(
             bbox_preds = all_bbox_preds[layer,batch] # [N, 10]
             gt_bbox = all_gt_bboxes_list[layer][batch] # [X, 9]
             gt_bbox_normed = normalize_bbox(gt_bbox) # [X, 10] out = torch.cat([cx, cy, w, l, cz, h, rot.sin(), rot.cos(), vx, vy], dim=-1)
+            
+            cls_scores = all_cls_scores[layer,batch] # [N, 10]
+            gt_labels = all_gt_labels_list[layer][batch] # [X]
                 
             with torch.no_grad():
                 pred_coord = bbox_preds[:,[0,1,4]] # [N, 3]
@@ -65,11 +76,23 @@ def loss_cal(
             
             # mmatch_result = {'pred':pred[pos_mask],'gt':gt[pos_mask]}
             # torch.save(mmatch_result,'mmatch_result_dict.pt')
-            import pdb;pdb.set_trace()
-            loss_single = F.l1_loss(pred[pos_mask], gt[pos_mask], reduction='mean')
-            loss_list.append(loss_single)
+            # import pdb;pdb.set_trace()
+            loss_bbox_single = F.l1_loss(pred[pos_mask], gt[pos_mask], reduction='mean')
+            
+            # for cls loss:
+            cls_preds = cls_scores[:,None,:].repeat(1,X,1) # [N, X, 10]
+            cls_gt = gt_labels[None,:].repeat(N,1) # [N, X]
+            
+            cls_preds_flat = cls_preds[pos_mask].view(-1,10)
+            cls_gt_flat = cls_gt[pos_mask].view(-1)
+            if cls_gt_flat.shape[0] != 0 and with_cls_loss:
+                loss_cls_single = focal(cls_preds_flat, cls_gt_flat, reduction_override='mean')
+                loss_list.extend([loss_bbox_single,loss_cls_single])
+            else:
+                loss_list.append(loss_bbox_single)
     
     
     all_losses = torch.stack(loss_list)   # shape = [num_layers * batches]
     mean_loss = all_losses.mean()
+    
     return torch.nan_to_num(mean_loss)
