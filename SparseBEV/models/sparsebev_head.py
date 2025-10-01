@@ -464,7 +464,7 @@ class SparseBEVHead(DETRHead):
         all_bbox_preds = preds_dicts['all_bbox_preds']
         enc_cls_scores = preds_dicts['enc_cls_scores']
         enc_bbox_preds = preds_dicts['enc_bbox_preds']
-        all_bbox_preds_aux_0 = preds_dicts['all_bbox_preds_aux_0']
+        # all_bbox_preds_aux_0 = preds_dicts['all_bbox_preds_aux_0']
 
         num_dec_layers = len(all_cls_scores)
         device = gt_labels_list[0].device

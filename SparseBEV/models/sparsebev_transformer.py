@@ -103,7 +103,7 @@ class SparseBEVTransformerDecoder(BaseModule):
             mlvl_feats[lvl] = feat.contiguous()
 
         # norm settings
-        Q = 900
+        Q = 900 # set this to zero to turn 3D norm down
         B, total, code = query_bbox.shape
         Q = min(Q, total) 
         jitter = 0.05
