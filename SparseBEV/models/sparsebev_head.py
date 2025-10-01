@@ -480,7 +480,7 @@ class SparseBEVHead(DETRHead):
         # torch.save(for_save,'loss_raw_data_v1.pt')
         # import pdb;pdb.set_trace()
         
-        loss_mmatch = loss_cal(all_cls_scores,all_bbox_preds_aux_0,all_gt_bboxes_list,all_gt_labels_list)
+        # loss_mmatch = loss_cal(all_cls_scores,all_bbox_preds_aux_0,all_gt_bboxes_list,all_gt_labels_list)
         
         losses_cls, losses_bbox = multi_apply(
             self.loss_single, all_cls_scores, all_bbox_preds,
@@ -514,7 +514,7 @@ class SparseBEVHead(DETRHead):
             loss_dict[f'd{num_dec_layer}.loss_bbox'] = loss_bbox_i
             num_dec_layer += 1
             
-        loss_dict['mmatch_loss'] = loss_mmatch
+        # loss_dict['mmatch_loss'] = loss_mmatch
         return loss_dict
 
     @force_fp32(apply_to=('preds_dicts'))

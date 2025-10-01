@@ -102,32 +102,57 @@ class SparseBEVTransformerDecoder(BaseModule):
                 feat = feat.reshape(B*T*G, C, N, H, W)
             mlvl_feats[lvl] = feat.contiguous()
 
+        # norm settings
+        Q = 900
+        B, total, code = query_bbox.shape
+        Q = min(Q, total) 
+        jitter = 0.05
+
+
         for i in range(self.num_layers):
             DUMP.stage_count = i
+            # 3D Norm
+            if self.training and Q > 0:
+                device = query_bbox.device
+                dtype = query_bbox.dtype
 
-            # --- 修改开始 7: 解包接收所有预测 ---
+                # 取 target slice (B, Q, 10)
+                start = total - Q
+                end = total
+                target = query_bbox[:, start:end, :]  # 不修改原 tensor（注意后面会写回）
+
+                # 随机偏移，均匀分布在 [-jitter, +jitter]
+                # delta shape: (B, Q, 2)
+                delta = (torch.rand((B, Q, 2), device=device, dtype=dtype) * 2.0 - 1.0) * jitter
+
+                # apply (注意不要在原地改写以免不小心破坏 autograd 中间值)
+                # 我们做 clone/assign 的方式保持图的连通性（即梯度仍然会回传到产生 query_bbox 的参数）
+                new_target = target.clone()
+                new_target[..., 0:2] = (new_target[..., 0:2] + delta).clamp(0.0, 1.0)
+
+                # 写回到 bbox_preds（如果 bbox_preds 不是 leaf node，这样的赋值会保留梯度）
+                query_bbox = query_bbox.clone()
+                query_bbox[:, start:end, :] = new_target
+                
             query_feat, cls_score, bbox_pred, layer_aux_preds = self.decoder_layer(
                 query_bbox, query_feat, mlvl_feats, attn_mask, img_metas
             )
-            # --- 修改结束 7 ---
             
             query_bbox = bbox_pred.clone().detach()
 
             cls_scores.append(cls_score)
             bbox_preds.append(bbox_pred)
-            # --- 修改开始 8: 将辅助预测分别存入对应的列表 ---
+            
             for i, aux_pred in enumerate(layer_aux_preds):
                 aux_bbox_preds[i].append(aux_pred)
-            # --- 修改结束 8 ---
-
         cls_scores = torch.stack(cls_scores)
         bbox_preds = torch.stack(bbox_preds)
-        # --- 修改开始 9: 堆叠所有辅助预测并返回 ---
+        
+        
         # e.g., [[L,B,Q,C], [L,B,Q,C]]
         stacked_aux_preds = [torch.stack(preds) for preds in aux_bbox_preds]
         
         return cls_scores, bbox_preds, stacked_aux_preds
-        # --- 修改结束 9 ---
 
 
 class SparseBEVTransformerDecoderLayer(BaseModule):
