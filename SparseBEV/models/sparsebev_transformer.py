@@ -11,6 +11,7 @@ from .utils import inverse_sigmoid, DUMP
 from .sparsebev_sampling import sampling_4d, make_sample_points
 from .checkpoint import checkpoint as cp
 from .csrc.wrapper import MSMV_CUDA
+import math
 
 
 @TRANSFORMER.register_module()
@@ -103,10 +104,10 @@ class SparseBEVTransformerDecoder(BaseModule):
             mlvl_feats[lvl] = feat.contiguous()
 
         # norm settings
-        Q = 900 # set this to zero to turn 3D norm down
+        Q = 0 # set this to zero to turn 3D norm down
         B, total, code = query_bbox.shape
         Q = min(Q, total) 
-        jitter = 0.05
+        jitter = 0.01
 
 
         for i in range(self.num_layers):
@@ -160,7 +161,7 @@ class SparseBEVTransformerDecoderLayer(BaseModule):
     # num_aux_reg_branches: 平行回归分支的数量，0表示关闭
     # num_aux_reg_fcs: 每个平行回归分支内部的层数
     def __init__(self, embed_dims, num_frames=8, num_points=4, num_levels=4, num_classes=10, code_size=10, num_cls_fcs=2, num_reg_fcs=2, 
-                 num_aux_reg_branches=0, num_aux_reg_fcs=2, # 新增参数
+                 num_aux_reg_branches=0, num_aux_reg_fcs=2,lora_rank=32, lora_alpha=1.0, # 新增参数
                  pc_range=[], init_cfg=None):
     # --- 修改结束 1 ---
         super(SparseBEVTransformerDecoderLayer, self).__init__(init_cfg)
@@ -204,17 +205,36 @@ class SparseBEVTransformerDecoderLayer(BaseModule):
         reg_branch.append(nn.Linear(self.embed_dims, self.code_size))
         self.reg_branch = nn.Sequential(*reg_branch)
 
-        # --- 修改开始 2: 构建并行的辅助回归分支 ---
-        # 使用 ModuleList 来存储可变数量的并行分支
-        self.aux_reg_branches = nn.ModuleList()
+        # --- 修改开始: 为每个辅助分支构建对应的LoRA参数 ---
+        self.num_aux_reg_branches = num_aux_reg_branches
+        self.lora_alpha = lora_alpha
+        # self.aux_lora_params 将是一个三维列表结构的 ModuleList:
+        # [branch_0, branch_1, ...]
+        #  └─ [layer_0_params, layer_1_params, ...]
+        #      └─ ParameterDict{'lora_A': ..., 'lora_B': ...}
+        self.aux_lora_params = nn.ModuleList()
         for _ in range(self.num_aux_reg_branches):
-            aux_reg_branch = []
-            for _ in range(num_aux_reg_fcs):
-                aux_reg_branch.append(nn.Linear(self.embed_dims, self.embed_dims))
-                aux_reg_branch.append(nn.ReLU(inplace=True))
-            aux_reg_branch.append(nn.Linear(self.embed_dims, self.code_size))
-            self.aux_reg_branches.append(nn.Sequential(*aux_reg_branch))
-        # --- 修改结束 2 ---
+            lora_params_for_one_branch = nn.ModuleList()
+            # 遍历主分支的每一层来创建镜像的LoRA参数
+            for layer in self.reg_branch:
+                if isinstance(layer, nn.Linear):
+                    in_features = layer.in_features
+                    out_features = layer.out_features
+                    
+                    lora_A = nn.Parameter(torch.Tensor(lora_rank, in_features))
+                    lora_B = nn.Parameter(torch.Tensor(out_features, lora_rank))
+                    nn.init.kaiming_uniform_(lora_A, a=math.sqrt(5))
+                    nn.init.zeros_(lora_B)
+                    
+                    lora_params_for_one_branch.append(nn.ParameterDict({
+                        'lora_A': lora_A,
+                        'lora_B': lora_B,
+                    }))
+                else:
+                    # 对于非线性层(如ReLU)，没有参数，放一个占位符
+                    lora_params_for_one_branch.append(None)
+            self.aux_lora_params.append(lora_params_for_one_branch)
+        # --- 修改结束 ---
 
 
     @torch.no_grad()
@@ -251,13 +271,39 @@ class SparseBEVTransformerDecoderLayer(BaseModule):
         bbox_pred = self.reg_branch(query_feat)  # [B, Q, code_size]
         bbox_pred = self.refine_bbox(query_bbox, bbox_pred)
 
-        # --- 修改开始 3: 计算所有并行分支的输出 ---
         aux_bbox_preds = []
-        for aux_branch in self.aux_reg_branches:
-            aux_pred = aux_branch(query_feat)
-            aux_pred = self.refine_bbox(query_bbox, aux_pred)
-            aux_bbox_preds.append(aux_pred)
-        # --- 修改结束 3 ---
+        # 遍历每一个辅助分支
+        for i in range(self.num_aux_reg_branches):
+            # 获取当前辅助分支对应的LoRA参数列表
+            current_lora_params = self.aux_lora_params[i]
+            
+            # 手动执行前向传播
+            x = query_feat
+            # 同时遍历主分支的层 和 当前辅助分支的LoRA参数
+            for layer, lora_param_group in zip(self.reg_branch, current_lora_params):
+                if isinstance(layer, nn.Linear):
+                    # --- 这里是实现您想法的关键 ---
+                    # a. 计算主分支原始层的输出
+                    base_output = layer(x)
+                    
+                    # b. 使用 .detach() "冻结"主分支的输出，阻止梯度回传到 `layer`
+                    detached_base_output = base_output.detach()
+                    
+                    # c. 计算当前辅助分支的LoRA增量
+                    lora_A = lora_param_group['lora_A']
+                    lora_B = lora_param_group['lora_B']
+                    lora_delta = (x @ lora_A.T) @ lora_B.T * self.lora_alpha
+                    
+                    # d. 将两者相加，得到这一层的最终输出
+                    # 梯度只会从 lora_delta 流回 lora_A 和 lora_B
+                    x = detached_base_output + lora_delta
+                
+                else: # 对于ReLU等非参数层
+                    # 直接应用
+                    x = layer(x)
+            
+            # 循环结束后, x 就是当前辅助分支的最终预测
+            aux_bbox_preds.append(x)
 
         # 对主分支和所有辅助分支的输出统一处理速度
         time_diff = img_metas[0]['time_diff']  # [B, F]

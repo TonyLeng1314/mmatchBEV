@@ -27,7 +27,7 @@ num_query = 900
 num_frames = 8
 num_levels = 4
 num_points = 4
-num_aux_path = 0
+num_aux_path = 1
 
 
 img_backbone = dict(
