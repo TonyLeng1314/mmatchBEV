@@ -15,7 +15,11 @@ from .csrc.wrapper import MSMV_CUDA
 
 @TRANSFORMER.register_module()
 class SparseBEVTransformer(BaseModule):
-    def __init__(self, embed_dims, num_frames=8, num_points=4, num_layers=6, num_levels=4, num_classes=10, code_size=10, pc_range=[], init_cfg=None):
+    # --- 修改开始 10: 接收并传递新参数 ---
+    def __init__(self, embed_dims, num_frames=8, num_points=4, num_layers=6, num_levels=4, num_classes=10, code_size=10, pc_range=[], 
+                 num_aux_reg_branches=0, num_aux_reg_fcs=2, # 新增
+                 init_cfg=None):
+    # --- 修改结束 10 ---
         assert init_cfg is None, 'To prevent abnormal initialization ' \
                             'behavior, init_cfg is not allowed to be set'
         super(SparseBEVTransformer, self).__init__(init_cfg=init_cfg)
@@ -23,30 +27,45 @@ class SparseBEVTransformer(BaseModule):
         self.embed_dims = embed_dims
         self.pc_range = pc_range
 
-        self.decoder = SparseBEVTransformerDecoder(embed_dims, num_frames, num_points, num_layers, num_levels, num_classes, code_size, pc_range=pc_range)
+        self.decoder = SparseBEVTransformerDecoder(
+            embed_dims, num_frames, num_points, num_layers, num_levels, num_classes, code_size, pc_range=pc_range,
+            num_aux_reg_branches=num_aux_reg_branches, num_aux_reg_fcs=num_aux_reg_fcs # 传递参数
+        )
 
     @torch.no_grad()
     def init_weights(self):
         self.decoder.init_weights()
 
     def forward(self, query_bbox, query_feat, mlvl_feats, attn_mask, img_metas):
-        cls_scores, bbox_preds = self.decoder(query_bbox, query_feat, mlvl_feats, attn_mask, img_metas)
+        # --- 修改开始 11: 解包接收所有输出 ---
+        cls_scores, bbox_preds, aux_bbox_preds = self.decoder(query_bbox, query_feat, mlvl_feats, attn_mask, img_metas)
+        # --- 修改结束 11 ---
 
         cls_scores = torch.nan_to_num(cls_scores)
         bbox_preds = torch.nan_to_num(bbox_preds)
+        # --- 修改开始 12: 对辅助输出也进行处理并返回 ---
+        for i in range(len(aux_bbox_preds)):
+            aux_bbox_preds[i] = torch.nan_to_num(aux_bbox_preds[i])
 
-        return cls_scores, bbox_preds
+        return cls_scores, bbox_preds, aux_bbox_preds
+        # --- 修改结束 12 ---
 
 
 class SparseBEVTransformerDecoder(BaseModule):
-    def __init__(self, embed_dims, num_frames=8, num_points=4, num_layers=6, num_levels=4, num_classes=10, code_size=10, pc_range=[], init_cfg=None):
+    # --- 修改开始 5: 在__init__中接收并传递新参数 ---
+    def __init__(self, embed_dims, num_frames=8, num_points=4, num_layers=6, num_levels=4, num_classes=10, code_size=10, pc_range=[], 
+                 num_aux_reg_branches=0, num_aux_reg_fcs=2, # 新增
+                 init_cfg=None):
+    # --- 修改结束 5 ---
         super(SparseBEVTransformerDecoder, self).__init__(init_cfg)
         self.num_layers = num_layers
         self.pc_range = pc_range
+        self.num_aux_reg_branches = num_aux_reg_branches # 保存
 
         # params are shared across all decoder layers
         self.decoder_layer = SparseBEVTransformerDecoderLayer(
-            embed_dims, num_frames, num_points, num_levels, num_classes, code_size, pc_range=pc_range
+            embed_dims, num_frames, num_points, num_levels, num_classes, code_size, pc_range=pc_range,
+            num_aux_reg_branches=num_aux_reg_branches, num_aux_reg_fcs=num_aux_reg_fcs # 传递参数
         )
 
     @torch.no_grad()
@@ -54,60 +73,77 @@ class SparseBEVTransformerDecoder(BaseModule):
         self.decoder_layer.init_weights()
 
     def forward(self, query_bbox, query_feat, mlvl_feats, attn_mask, img_metas):
+        # --- 修改开始 6: 初始化用于存储辅助预测的列表 ---
         cls_scores, bbox_preds = [], []
+        # 创建一个列表，其中每个元素都是一个空列表，用于存储对应辅助分支的各层输出
+        # e.g., if num_aux_reg_branches = 2, aux_bbox_preds will be [[], []]
+        aux_bbox_preds = [[] for _ in range(self.num_aux_reg_branches)]
+        # --- 修改结束 6 ---
 
-        # calculate time difference according to timestamps
+        # ... (时间戳和特征处理部分不变) ...
         timestamps = np.array([m['img_timestamp'] for m in img_metas], dtype=np.float64)
         timestamps = np.reshape(timestamps, [query_bbox.shape[0], -1, 6])
         time_diff = timestamps[:, :1, :] - timestamps
-        time_diff = np.mean(time_diff, axis=-1).astype(np.float32)  # [B, F]
-        time_diff = torch.from_numpy(time_diff).to(query_bbox.device)  # [B, F]
+        time_diff = np.mean(time_diff, axis=-1).astype(np.float32)
+        time_diff = torch.from_numpy(time_diff).to(query_bbox.device)
         img_metas[0]['time_diff'] = time_diff
-
-        # organize projections matrix and copy to CUDA
         lidar2img = np.asarray([m['lidar2img'] for m in img_metas]).astype(np.float32)
-        lidar2img = torch.from_numpy(lidar2img).to(query_bbox.device)  # [B, N, 4, 4]
+        lidar2img = torch.from_numpy(lidar2img).to(query_bbox.device)
         img_metas[0]['lidar2img'] = lidar2img
-
-        # group image features in advance for sampling, see `sampling_4d` for more details
         for lvl, feat in enumerate(mlvl_feats):
-            B, TN, GC, H, W = feat.shape  # [B, TN, GC, H, W]
+            B, TN, GC, H, W = feat.shape
             N, T, G, C = 6, TN // 6, 4, GC // 4
             feat = feat.reshape(B, T, N, G, C, H, W)
-
-            if MSMV_CUDA:  # Our CUDA operator requires channel_last
-                feat = feat.permute(0, 1, 3, 2, 5, 6, 4)  # [B, T, G, N, H, W, C]
+            if MSMV_CUDA:
+                feat = feat.permute(0, 1, 3, 2, 5, 6, 4)
                 feat = feat.reshape(B*T*G, N, H, W, C)
-            else:  # Torch's grid_sample requires channel_first
-                feat = feat.permute(0, 1, 3, 4, 2, 5, 6)  # [B, T, G, C, N, H, W]
+            else:
+                feat = feat.permute(0, 1, 3, 4, 2, 5, 6)
                 feat = feat.reshape(B*T*G, C, N, H, W)
-
             mlvl_feats[lvl] = feat.contiguous()
 
         for i in range(self.num_layers):
             DUMP.stage_count = i
 
-            query_feat, cls_score, bbox_pred = self.decoder_layer(
+            # --- 修改开始 7: 解包接收所有预测 ---
+            query_feat, cls_score, bbox_pred, layer_aux_preds = self.decoder_layer(
                 query_bbox, query_feat, mlvl_feats, attn_mask, img_metas
             )
+            # --- 修改结束 7 ---
+            
             query_bbox = bbox_pred.clone().detach()
 
             cls_scores.append(cls_score)
             bbox_preds.append(bbox_pred)
+            # --- 修改开始 8: 将辅助预测分别存入对应的列表 ---
+            for i, aux_pred in enumerate(layer_aux_preds):
+                aux_bbox_preds[i].append(aux_pred)
+            # --- 修改结束 8 ---
 
         cls_scores = torch.stack(cls_scores)
         bbox_preds = torch.stack(bbox_preds)
-
-        return cls_scores, bbox_preds
+        # --- 修改开始 9: 堆叠所有辅助预测并返回 ---
+        # e.g., [[L,B,Q,C], [L,B,Q,C]]
+        stacked_aux_preds = [torch.stack(preds) for preds in aux_bbox_preds]
+        
+        return cls_scores, bbox_preds, stacked_aux_preds
+        # --- 修改结束 9 ---
 
 
 class SparseBEVTransformerDecoderLayer(BaseModule):
-    def __init__(self, embed_dims, num_frames=8, num_points=4, num_levels=4, num_classes=10, code_size=10, num_cls_fcs=2, num_reg_fcs=2, pc_range=[], init_cfg=None):
+    # --- 修改开始 1: 在__init__中增加两个新参数 ---
+    # num_aux_reg_branches: 平行回归分支的数量，0表示关闭
+    # num_aux_reg_fcs: 每个平行回归分支内部的层数
+    def __init__(self, embed_dims, num_frames=8, num_points=4, num_levels=4, num_classes=10, code_size=10, num_cls_fcs=2, num_reg_fcs=2, 
+                 num_aux_reg_branches=0, num_aux_reg_fcs=2, # 新增参数
+                 pc_range=[], init_cfg=None):
+    # --- 修改结束 1 ---
         super(SparseBEVTransformerDecoderLayer, self).__init__(init_cfg)
 
         self.embed_dims = embed_dims
         self.num_classes = num_classes
         self.code_size = code_size
+        self.num_aux_reg_branches = num_aux_reg_branches # 保存参数
         self.pc_range = pc_range
 
         self.position_encoder = nn.Sequential(
@@ -143,6 +179,19 @@ class SparseBEVTransformerDecoderLayer(BaseModule):
         reg_branch.append(nn.Linear(self.embed_dims, self.code_size))
         self.reg_branch = nn.Sequential(*reg_branch)
 
+        # --- 修改开始 2: 构建并行的辅助回归分支 ---
+        # 使用 ModuleList 来存储可变数量的并行分支
+        self.aux_reg_branches = nn.ModuleList()
+        for _ in range(self.num_aux_reg_branches):
+            aux_reg_branch = []
+            for _ in range(num_aux_reg_fcs):
+                aux_reg_branch.append(nn.Linear(self.embed_dims, self.embed_dims))
+                aux_reg_branch.append(nn.ReLU(inplace=True))
+            aux_reg_branch.append(nn.Linear(self.embed_dims, self.code_size))
+            self.aux_reg_branches.append(nn.Sequential(*aux_reg_branch))
+        # --- 修改结束 2 ---
+
+
     @torch.no_grad()
     def init_weights(self):
         self.self_attn.init_weights()
@@ -172,25 +221,42 @@ class SparseBEVTransformerDecoderLayer(BaseModule):
         query_feat = self.norm3(self.ffn(query_feat))
 
         cls_score = self.cls_branch(query_feat)  # [B, Q, num_classes]
+        
+        # 主回归分支
         bbox_pred = self.reg_branch(query_feat)  # [B, Q, code_size]
         bbox_pred = self.refine_bbox(query_bbox, bbox_pred)
 
-        # calculate absolute velocity according to time difference
+        # --- 修改开始 3: 计算所有并行分支的输出 ---
+        aux_bbox_preds = []
+        for aux_branch in self.aux_reg_branches:
+            aux_pred = aux_branch(query_feat)
+            aux_pred = self.refine_bbox(query_bbox, aux_pred)
+            aux_bbox_preds.append(aux_pred)
+        # --- 修改结束 3 ---
+
+        # 对主分支和所有辅助分支的输出统一处理速度
         time_diff = img_metas[0]['time_diff']  # [B, F]
         if time_diff.shape[1] > 1:
             time_diff = time_diff.clone()
             time_diff[time_diff < 1e-5] = 1.0
+            # 主分支
             bbox_pred[..., 8:] = bbox_pred[..., 8:] / time_diff[:, 1:2, None]
+            # 辅助分支
+            for i in range(len(aux_bbox_preds)):
+                aux_bbox_preds[i][..., 8:] = aux_bbox_preds[i][..., 8:] / time_diff[:, 1:2, None]
 
         if DUMP.enabled:
+            # ... (DUMP logic remains the same, only showing main predictions for simplicity)
             query_bbox_dec = decode_bbox(query_bbox, self.pc_range)
             bbox_pred_dec = decode_bbox(bbox_pred, self.pc_range)
             cls_score_sig = torch.sigmoid(cls_score)
             torch.save(query_bbox_dec.cpu(), '{}/query_bbox_stage{}.pth'.format(DUMP.out_dir, DUMP.stage_count))
             torch.save(bbox_pred_dec.cpu(), '{}/bbox_pred_stage{}.pth'.format(DUMP.out_dir, DUMP.stage_count))
             torch.save(cls_score_sig.cpu(), '{}/cls_score_stage{}.pth'.format(DUMP.out_dir, DUMP.stage_count))
-
-        return query_feat, cls_score, bbox_pred
+        
+        # --- 修改开始 4: 返回所有分支的预测结果 ---
+        return query_feat, cls_score, bbox_pred, aux_bbox_preds
+        # --- 修改结束 4 ---
 
 
 class SparseBEVSelfAttention(BaseModule):

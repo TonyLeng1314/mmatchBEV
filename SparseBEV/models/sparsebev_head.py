@@ -14,10 +14,12 @@ from .mmatch.sparsebev_mmatch import loss_cal
 
 @HEADS.register_module()
 class SparseBEVHead(DETRHead):
+    # --- 修改开始 1: 在__init__中增加 num_aux_reg_branches 参数 ---
     def __init__(self,
                  *args,
                  num_classes,
                  in_channels,
+                 num_aux_reg_branches=0, # 新增参数，默认值为0以保持兼容性
                  query_denoising=True,
                  query_denoising_groups=10,
                  bbox_coder=None,
@@ -26,6 +28,7 @@ class SparseBEVHead(DETRHead):
                  train_cfg=dict(),
                  test_cfg=dict(max_per_img=100),
                  **kwargs):
+    # --- 修改结束 1 ---
         self.code_size = code_size
         self.code_weights = code_weights
         self.num_classes = num_classes
@@ -34,6 +37,7 @@ class SparseBEVHead(DETRHead):
         self.test_cfg = test_cfg
         self.fp16_enabled = False
         self.embed_dims = in_channels
+        self.num_aux_reg_branches = num_aux_reg_branches # 保存参数
 
         super(SparseBEVHead, self).__init__(num_classes, in_channels, train_cfg=train_cfg, test_cfg=test_cfg, **kwargs)
 
@@ -69,37 +73,68 @@ class SparseBEVHead(DETRHead):
 
     def forward(self, mlvl_feats, img_metas):
         query_bbox = self.init_query_bbox.weight.clone()  # [Q, 10]
-        #query_bbox[..., :3] = query_bbox[..., :3].sigmoid()
 
         # query denoising
         B = mlvl_feats[0].shape[0]
         query_bbox, query_feat, attn_mask, mask_dict = self.prepare_for_dn_input(B, query_bbox, self.label_enc, img_metas)
 
-        cls_scores, bbox_preds = self.transformer(
+        # --- 修改开始 2: 接收Transformer返回的所有预测 ---
+        # aux_bbox_preds 是一个列表，包含了所有并行分支的输出
+        # 每个元素的形状为 [num_layers, B, Q, code_size]
+        cls_scores, bbox_preds, aux_bbox_preds = self.transformer(
             query_bbox,
             query_feat,
             mlvl_feats,
             attn_mask=attn_mask,
             img_metas=img_metas,
         )
+        # --- 修改结束 2 ---
 
-        bbox_preds[..., 0] = bbox_preds[..., 0] * (self.pc_range[3] - self.pc_range[0]) + self.pc_range[0]
-        bbox_preds[..., 1] = bbox_preds[..., 1] * (self.pc_range[4] - self.pc_range[1]) + self.pc_range[1]
-        bbox_preds[..., 2] = bbox_preds[..., 2] * (self.pc_range[5] - self.pc_range[2]) + self.pc_range[2]
+        # --- 修改开始 3: 统一对所有bbox预测进行后处理 ---
+        # 将主预测和所有辅助预测打包到一个列表中，方便循环处理
+        all_bbox_preds_to_process = [bbox_preds] + aux_bbox_preds
+        processed_bbox_preds = []
 
-        bbox_preds = torch.cat([
-            bbox_preds[..., 0:2],
-            bbox_preds[..., 3:5],
-            bbox_preds[..., 2:3],
-            bbox_preds[..., 5:10],
-        ], dim=-1)  # [cx, cy, w, l, cz, h, sin, cos, vx, vy]
+        for preds in all_bbox_preds_to_process:
+            # 坐标缩放
+            preds[..., 0] = preds[..., 0] * (self.pc_range[3] - self.pc_range[0]) + self.pc_range[0]
+            preds[..., 1] = preds[..., 1] * (self.pc_range[4] - self.pc_range[1]) + self.pc_range[1]
+            preds[..., 2] = preds[..., 2] * (self.pc_range[5] - self.pc_range[2]) + self.pc_range[2]
+
+            # 维度重排
+            processed_pred = torch.cat([
+                preds[..., 0:2],
+                preds[..., 3:5],
+                preds[..., 2:3],
+                preds[..., 5:10],
+            ], dim=-1)  # [cx, cy, w, l, cz, h, sin, cos, vx, vy]
+            processed_bbox_preds.append(processed_pred)
+
+        # 从处理后的列表中解包
+        bbox_preds = processed_bbox_preds[0]
+        processed_aux_preds = processed_bbox_preds[1:]
+        # --- 修改结束 3 ---
+
 
         if mask_dict is not None and mask_dict['pad_size'] > 0:  # if using query denoising
+            # --- 修改开始 4: 为所有bbox预测拆分denoising和matching部分 ---
+            # 主分支
             output_known_cls_scores = cls_scores[:, :, :mask_dict['pad_size'], :]
             output_known_bbox_preds = bbox_preds[:, :, :mask_dict['pad_size'], :]
             output_cls_scores = cls_scores[:, :, mask_dict['pad_size']:, :]
             output_bbox_preds = bbox_preds[:, :, mask_dict['pad_size']:, :]
+            
+            # 辅助分支
+            output_known_aux_bbox_preds = []
+            output_aux_bbox_preds = []
+            for aux_pred in processed_aux_preds:
+                output_known_aux_bbox_preds.append(aux_pred[:, :, :mask_dict['pad_size'], :])
+                output_aux_bbox_preds.append(aux_pred[:, :, mask_dict['pad_size']:, :])
+
+            # 将已知真值的预测打包
             mask_dict['output_known_lbs_bboxes'] = (output_known_cls_scores, output_known_bbox_preds)
+            
+            # 构建输出字典
             outs = {
                 'all_cls_scores': output_cls_scores,
                 'all_bbox_preds': output_bbox_preds,
@@ -107,13 +142,26 @@ class SparseBEVHead(DETRHead):
                 'enc_bbox_preds': None, 
                 'dn_mask_dict': mask_dict,
             }
-        else:
+
+            # 将辅助分支的预测添加到输出字典中
+            for i in range(self.num_aux_reg_branches):
+                outs[f'all_bbox_preds_aux_{i}'] = output_aux_bbox_preds[i]
+                # 也将辅助分支的denoising部分输出，以便计算loss
+                mask_dict[f'output_known_bbox_preds_aux_{i}'] = output_known_aux_bbox_preds[i]
+
+            # --- 修改结束 4 ---
+        else: # not using query denoising
+            # --- 修改开始 5: 构建不含denoising的输出字典 ---
             outs = {
                 'all_cls_scores': cls_scores,
                 'all_bbox_preds': bbox_preds,
                 'enc_cls_scores': None,
                 'enc_bbox_preds': None, 
             }
+            # 将辅助分支的预测添加到输出字典中
+            for i, aux_pred in enumerate(processed_aux_preds):
+                outs[f'all_bbox_preds_aux_{i}'] = aux_pred
+            # --- 修改结束 5 ---
 
         return outs
 
@@ -416,6 +464,7 @@ class SparseBEVHead(DETRHead):
         all_bbox_preds = preds_dicts['all_bbox_preds']
         enc_cls_scores = preds_dicts['enc_cls_scores']
         enc_bbox_preds = preds_dicts['enc_bbox_preds']
+        all_bbox_preds_aux_0 = preds_dicts['all_bbox_preds_aux_0']
 
         num_dec_layers = len(all_cls_scores)
         device = gt_labels_list[0].device
@@ -431,7 +480,7 @@ class SparseBEVHead(DETRHead):
         # torch.save(for_save,'loss_raw_data_v1.pt')
         # import pdb;pdb.set_trace()
         
-        loss_mmatch = loss_cal(all_cls_scores,all_bbox_preds,all_gt_bboxes_list,all_gt_labels_list)
+        loss_mmatch = loss_cal(all_cls_scores,all_bbox_preds_aux_0,all_gt_bboxes_list,all_gt_labels_list)
         
         losses_cls, losses_bbox = multi_apply(
             self.loss_single, all_cls_scores, all_bbox_preds,

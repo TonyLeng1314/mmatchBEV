@@ -73,11 +73,18 @@ def loss_cal(
             X,_ = gt_bbox.shape
             pred = bbox_preds[:,None,:].repeat(1,X,1)
             gt = gt_bbox_normed[None,:,:].repeat(N,1,1)
-            
+            num_postive = pos_mask.float().sum()
             # mmatch_result = {'pred':pred[pos_mask],'gt':gt[pos_mask]}
             # torch.save(mmatch_result,'mmatch_result_dict.pt')
             # import pdb;pdb.set_trace()
-            loss_bbox_single = F.l1_loss(pred[pos_mask], gt[pos_mask], reduction='mean')
+            if num_postive != 0:
+                loss_bbox_diff = torch.abs(pred[pos_mask]-gt[pos_mask])
+                loss_bbox_single = loss_bbox_diff.sum()*torch.tensor([2.,2.,1,1,1,1,1,1,1,1],device = loss_bbox_diff.device) / num_postive
+            else:
+                loss_bbox_single = pred[pos_mask].sum()
+            
+            
+            
             
             # for cls loss:
             cls_preds = cls_scores[:,None,:].repeat(1,X,1) # [N, X, 10]
@@ -85,6 +92,7 @@ def loss_cal(
             
             cls_preds_flat = cls_preds[pos_mask].view(-1,10)
             cls_gt_flat = cls_gt[pos_mask].view(-1)
+            
             if cls_gt_flat.shape[0] != 0 and with_cls_loss:
                 loss_cls_single = focal(cls_preds_flat, cls_gt_flat, reduction_override='mean')
                 loss_list.extend([loss_bbox_single,loss_cls_single])
